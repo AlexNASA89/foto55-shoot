@@ -253,6 +253,8 @@ async function startTake() {
     const mb = lastBlob.size / 1048576;
     $("msg").textContent += ` · видео ${mb.toFixed(0)} МБ` + (mb > 19 ? " — большое, в Телеграм не пройдёт, сними ещё" : "");
     $("save").hidden = false; $("dl").hidden = false;
+    const probe = document.createElement("video"); probe.muted = true; probe.src = URL.createObjectURL(lastBlob);   // size actually written
+    probe.onloadedmetadata = () => { $("msg").textContent += ` · ${probe.videoWidth}×${probe.videoHeight}`; };
   };
   const record = async () => { const started = new Promise(r => rec.onstart = r); rec.start(1000); await started; recStart = performance.now(); };
   const countdown = async () => {
@@ -297,8 +299,15 @@ async function begin(m) {
   for (const b of ["goStatic", "goClip"]) { $(b).disabled = true; }
   $(mode === "static" ? "goStatic" : "goClip").textContent = "Включаю…";
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: false,
-      video: { facingMode: "user", width: { ideal: 4096 }, height: { ideal: 4096 }, frameRate: { ideal: 30 } } });   // biggest the camera gives
+    // iPhone Safari hands out ~624x832 for loose "ideal" sizes: ask for exact sizes, biggest first
+    const SIZES = [[1080, 1920], [1920, 1080], [1440, 1920], [1920, 1440], [720, 1280], [1280, 720]];
+    for (const [w, h] of SIZES) {
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+        video: { facingMode: "user", width: { exact: w }, height: { exact: h }, frameRate: { ideal: 30 } } }); break; }
+      catch (e) { stream = null; }
+    }
+    if (!stream) stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+      video: { facingMode: "user", width: { ideal: 1920 }, height: { ideal: 1920 }, frameRate: { ideal: 30 } } });
     const track = stream.getVideoTracks()[0], s0 = track.getSettings(), long = Math.max(s0.width || 0, s0.height || 0);
     if (long > 1920) {                                   // 4K makes 150 MB takes: step down to 1080p, same shape
       const k = 1920 / long;
