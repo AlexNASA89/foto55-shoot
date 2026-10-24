@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Съёмка под ролик</title>
+<style>
+  :root { --bg:#0e1013; --panel:#000a; --text:#eef0f2; --dim:#a3a9b1; --go:#2f7a45; --rec:#d33a3a;
+          --eye:#38bdf8; --nose:#f472b6; --mouth:#fb923c; --cont:#4ade80; --me:#ffffff; color-scheme:dark; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font:15px/1.3 -apple-system, system-ui, sans-serif; overflow:hidden; }
+  #wrap { position:fixed; inset:0; }
+  #cam { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); background:#000; }
+  #ov { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  #tgt { position:absolute; right:max(10px, env(safe-area-inset-right)); top:calc(10px + env(safe-area-inset-top)); width:28vw; max-width:160px;
+         border-radius:10px; border:2px solid #fff6; background:#000; }
+  #top { position:absolute; left:max(10px, env(safe-area-inset-left)); top:calc(10px + env(safe-area-inset-top)); right:calc(28vw + 24px);
+         display:grid; gap:6px; }
+  .pill { background:var(--panel); padding:6px 10px; border-radius:10px; font-size:14px; }
+  #meter { height:10px; background:#ffffff22; border-radius:5px; overflow:hidden; }
+  #fill { height:100%; width:0; background:#d33a3a; transition:width .15s, background .15s; }
+  #big { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:110px; font-weight:800;
+         text-shadow:0 4px 20px #000; pointer-events:none; }
+  #bar { position:absolute; left:0; right:0; bottom:0; padding:12px max(14px, env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+         display:flex; gap:10px; background:linear-gradient(transparent, #000c 40%); }
+  button { flex:1; min-height:54px; border-radius:14px; border:1px solid #ffffff33; background:#2a2f37; color:var(--text);
+           font:600 17px -apple-system, system-ui, sans-serif; }
+  button.go { background:var(--go); border-color:#3f9a5a; }
+  button.rec { background:var(--rec); border-color:#e66; }
+  button[hidden] { display:none; }
+  #intro { position:absolute; inset:0; background:#0e1013f2; padding:calc(24px + env(safe-area-inset-top)) 20px 20px; overflow:auto; }
+  #intro h1 { font-size:22px; margin:0 0 12px; }
+  #intro ol { padding-left:20px; display:grid; gap:10px; margin:0 0 18px; }
+  #intro[hidden] { display:none; }
+  #err { color:#ff9b9b; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="ov"></canvas>
+  <video id="tgt" src="target.mp4" playsinline muted preload="auto"></video>
+  <div id="top">
+    <div class="pill" id="msg">Встань так, чтобы лицо попало в зелёный контур</div>
+    <div id="meter"><div id="fill"></div></div>
+  </div>
+  <div id="big"></div>
+  <div id="bar">
+    <button id="start" class="rec">● Старт</button>
+    <button id="again" hidden>Ещё дубль</button>
+    <button id="save" class="go" hidden>Сохранить</button>
+  </div>
+  <div id="intro">
+    <h1>Съёмка под ролик</h1>
+    <ol>
+      <li>Телефон на подставке, на уровне глаз. Лицом к окну.</li>
+      <li>Зелёный контур и цветные точки — где должно быть твоё лицо. Белые точки — твои глаза, нос, рот.</li>
+      <li>Отойди или подойди, чтобы лицо легло в контур. Полоска сверху зелёная — точки совпали.</li>
+      <li>«Старт» → 3-2-1 → точки начнут двигаться, в углу пойдёт ролик. Повторяй за ним: спокойно → улыбка → прищур. 7 секунд.</li>
+      <li>После дубля — оценка. «Сохранить» → сохрани видео или отправь в Телеграм файлом.</li>
+    </ol>
+    <p id="err"></p>
+    <button id="go" class="go">Включить камеру</button>
+  </div>
+</div>
+<script type="module">
+// Target: Pixabay 171044, 183 frames at 25 fps; marks in 1200-px crop units (5 points + 16-point contour).
+// The preview is mirrored, so the target marks are mirrored too: matching them in the mirror means the
+// raw (unmirrored) recording matches the target directly.
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const $ = id => document.getElementById(id);
+const cam = $("cam"), ov = $("ov"), ctx = ov.getContext("2d"), tgt = $("tgt");
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const MP5 = [468, 473, 1, 61, 291];                    // pupils (image left/right), nose tip, mouth corners
+const COLS = ["--eye", "--eye", "--nose", "--mouth", "--mouth"];
+const COUNT = 3000, TAIL = 500;                         // ms of countdown before the target starts, and after it ends
+
+let M = null, lm = null, stream = null, rec = null, chunks = [], mime = "";
+let state = "setup", t0 = 0, recStart = 0, offsetMs = 0, scores = [], lastBlob = null, take = 0;
+let mine = null;                                         // my 5 points in screen space (mirrored), or null
+
+// ---------- target placement: frame 1 contour fills half the screen height, centred a bit above the middle
+let place = null;
+function layout() {
+  const W = innerWidth, H = innerHeight, dpr = devicePixelRatio || 1;
+  ov.width = W * dpr; ov.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (!M) return;
+  const c = M.frames[0].slice(5); let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  for (const [x, y] of c) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  const s = Math.min(0.5 * H / (y1 - y0), 0.8 * W / (x1 - x0));
+  place = { s, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, X: W / 2, Y: 0.45 * H, W };
+}
+const tp = ([x, y]) => [place.W - (place.X + (x - place.cx) * place.s), place.Y + (y - place.cy) * place.s];   // mirrored
+
+function frameAt(now) {
+  if (state !== "play") return 0;
+  return Math.min(M.frames.length - 1, Math.max(0, Math.floor((now - t0) / 1000 * M.fps)));
+}
+
+// ---------- my face: MediaPipe on a small copy of the camera frame
+const small = document.createElement("canvas"), sctx = small.getContext("2d", { willReadFrequently: true });
+function detect(now) {
+  if (!lm || cam.readyState < 2) return;
+  const vw = cam.videoWidth, vh = cam.videoHeight, k = 480 / Math.max(vw, vh);
+  small.width = Math.round(vw * k); small.height = Math.round(vh * k);
+  sctx.drawImage(cam, 0, 0, small.width, small.height);
+  const r = lm.detectForVideo(small, now);
+  if (!r.faceLandmarks || !r.faceLandmarks.length) { mine = null; return; }
+  // camera px -> screen px for object-fit: cover, then mirror
+  const W = innerWidth, H = innerHeight, sc = Math.max(W / vw, H / vh), ox = (W - vw * sc) / 2, oy = (H - vh * sc) / 2;
+  const L = r.faceLandmarks[0];
+  mine = MP5.map(i => [W - (ox + L[i].x * vw * sc), oy + L[i].y * vh * sc]);
+}
+
+function score(f) {                                      // 0..100: how close my 5 points are to the target's
+  if (!mine) return 0;
+  const T = M.frames[f].slice(0, 5).map(tp), e = Math.hypot(T[1][0] - T[0][0], T[1][1] - T[0][1]);
+  let d = 0; for (let i = 0; i < 5; i++) d += Math.hypot(mine[i][0] - T[i][0], mine[i][1] - T[i][1]);
+  return Math.max(0, Math.min(100, 100 - (d / 5 / e) * 250));
+}
+
+function draw(f, sc) {
+  const W = innerWidth, H = innerHeight;
+  ctx.clearRect(0, 0, W, H);
+  if (!place) return;
+  const fr = M.frames[f], c = fr.slice(5).map(tp);
+  ctx.lineWidth = 3; ctx.strokeStyle = css("--cont"); ctx.beginPath();
+  c.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); ctx.stroke();
+  fr.slice(0, 5).map(tp).forEach(([x, y], i) => { ctx.fillStyle = css(COLS[i]); ctx.beginPath(); ctx.arc(x, y, 9, 0, 7); ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke(); });
+  if (mine) for (const [x, y] of mine) { ctx.strokeStyle = css("--me"); ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.stroke(); }
+  $("fill").style.width = sc + "%";
+  $("fill").style.background = sc > 75 ? "#3fbf5f" : sc > 45 ? "#e0a43a" : "#d33a3a";
+}
+
+function loop(now) {
+  detect(now);
+  const f = frameAt(now), sc = score(f);
+  draw(f, sc);
+  if (state === "play") {
+    scores.push([f, sc]);
+    if (now - t0 > M.frames.length / M.fps * 1000 + TAIL) finishTake();
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---------- recording
+function pickMime() {
+  for (const m of ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"])
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+  return "";
+}
+async function startTake() {
+  $("start").hidden = true; $("again").hidden = true; $("save").hidden = true;
+  chunks = []; scores = []; lastBlob = null; take++;
+  mime = pickMime();
+  try { rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 12e6 } : undefined); }
+  catch (e) { rec = new MediaRecorder(stream); }
+  rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  rec.onstop = () => { lastBlob = new Blob(chunks, { type: rec.mimeType || mime || "video/mp4" }); $("save").hidden = false; };
+  const started = new Promise(r => rec.onstart = r);
+  rec.start(1000); await started; recStart = performance.now();
+  state = "count";
+  for (let n = 3; n > 0; n--) { $("big").textContent = n; await new Promise(r => setTimeout(r, COUNT / 3)); }
+  $("big").textContent = "";
+  tgt.currentTime = 0; tgt.play().catch(() => {});
+  t0 = performance.now(); offsetMs = Math.round(t0 - recStart); state = "play";
+  $("msg").textContent = "Повторяй за роликом";
+}
+function finishTake() {
+  state = "setup"; tgt.pause();
+  try { rec.stop(); } catch (e) { /* already stopped */ }
+  const v = scores.map(s => s[1]), avg = v.reduce((a, b) => a + b, 0) / Math.max(1, v.length);
+  let worst = scores.reduce((w, s) => s[1] < w[1] ? s : w, [0, 101]);
+  $("msg").textContent = `Дубль ${take}: совпадение ${Math.round(avg)}%` + (v.length ? `, хуже всего на ${(worst[0] / M.fps).toFixed(1)} с (${Math.round(worst[1])}%)` : "");
+  $("again").hidden = false;
+}
+async function saveTake() {
+  if (!lastBlob) return;
+  const ext = (lastBlob.type || "").includes("webm") ? "webm" : "mp4";
+  const name = `alex_take${take}_offset${offsetMs}ms.${ext}`;
+  const file = new File([lastBlob], name, { type: lastBlob.type || "video/mp4" });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+  } catch (e) { if (e.name === "AbortError") return; }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+}
+
+// ---------- start
+$("go").onclick = async () => {
+  $("go").disabled = true; $("go").textContent = "Включаю…";
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+      video: { facingMode: "user", width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } } });
+    cam.srcObject = stream; await cam.play();
+    M = await (await fetch("marks.json")).json();
+    layout(); addEventListener("resize", layout);
+    $("intro").hidden = true;
+    requestAnimationFrame(loop);
+    const fs = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    const opts = d => ({ baseOptions: { modelAssetPath: "face_landmarker.task", delegate: d }, runningMode: "VIDEO", numFaces: 1 });
+    try { lm = await FaceLandmarker.createFromOptions(fs, opts("GPU")); }
+    catch (e) { lm = await FaceLandmarker.createFromOptions(fs, opts("CPU")); }
+    const s = stream.getVideoTracks()[0].getSettings();
+    $("msg").textContent = `Камера ${s.width}×${s.height}. Встань так, чтобы лицо попало в контур`;
+  } catch (e) {
+    $("err").textContent = "Не получилось: " + (e && e.message || e) + ". Разреши камеру в Safari (аА → Настройки сайта → Камера).";
+    $("go").disabled = false; $("go").textContent = "Включить камеру";
+  }
+};
+$("start").onclick = startTake;
+$("again").onclick = () => { $("again").hidden = true; $("save").hidden = true; $("start").hidden = false; $("msg").textContent = "Встань в контур и жми «Старт»"; };
+$("save").onclick = saveTake;
+</script>
+</body>
+</html>
