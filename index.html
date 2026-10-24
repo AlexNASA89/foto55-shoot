@@ -122,7 +122,12 @@ function layout() {
   const hShare = mode === "static" ? 0.42 : 0.5, yc = mode === "static" ? 0.56 : 0.45;
   const s = Math.min(hShare * H / (y1 - y0), 0.8 * W / (x1 - x0));
   place = { s, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, X: W / 2, Y: yc * H, W, top: yc * H - (y1 - y0) / 2 * s };
-  place.aim = [W / 2, Math.max(110, place.top - 70)];    // aim pad centre: above the face, near the camera
+  // Alex 24.10 19:16: the dot above the face was too far from where he looks — the aim now sits on the face,
+  // between the eyes and the nose; the hint is written on the chin
+  const f0 = M.frames[STILL], ey = [(f0[0][0] + f0[1][0]) / 2, (f0[0][1] + f0[1][1]) / 2];
+  place.aim = tp([(ey[0] + f0[2][0]) / 2, (ey[1] + f0[2][1]) / 2]);
+  const mouthY = tp(f0[3])[1] / 2 + tp(f0[4])[1] / 2, chinY = Math.max(...f0.slice(5).map(q => tp(q)[1]));
+  place.chin = [W / 2, mouthY * 0.35 + chinY * 0.65];
 }
 const tp = ([x, y]) => [place.W - (place.X + (x - place.cx) * place.s), place.Y + (y - place.cy) * place.s];
 
@@ -168,12 +173,18 @@ function pointsScore(T) {
 }
 
 // ---------- drawing
-function drawFace(fr) {
-  const c = fr.slice(5).map(tp);
-  ctx.lineWidth = 3; ctx.strokeStyle = css("--cont"); ctx.beginPath();
+function drawFace(fr, quiet) {                          // quiet: thinner, smaller, no nose point (the aim is there)
+  const c = fr.slice(5).map(tp), r = quiet ? 6 : 9;
+  ctx.lineWidth = quiet ? 2 : 3; ctx.strokeStyle = css("--cont"); ctx.beginPath();
   c.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); ctx.stroke();
-  fr.slice(0, 5).map(tp).forEach(([x, y], i) => { ctx.fillStyle = css(COLS[i]); ctx.beginPath(); ctx.arc(x, y, 9, 0, 7); ctx.fill();
+  fr.slice(0, 5).map(tp).forEach(([x, y], i) => { if (quiet && i === 2) return;
+    ctx.fillStyle = css(COLS[i]); ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
     ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke(); });
+}
+function chinText(t) {
+  if (!t) return;
+  ctx.font = "800 26px -apple-system, system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineWidth = 6; ctx.strokeStyle = "#000c"; ctx.strokeText(t, ...place.chin); ctx.fillStyle = "#fff"; ctx.fillText(t, ...place.chin);
 }
 function arrow(from, dir, len, col) {
   const n = Math.hypot(dir[0], dir[1]); if (n < 1e-6) return;
@@ -192,26 +203,24 @@ function draw(now) {
     if (mine) for (const [x, y] of mine) { ctx.strokeStyle = css("--me"); ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.stroke(); }
     return pointsScore(fr.slice(0, 5).map(tp));
   }
-  // static: fixed face frame, aim pad above it
-  const fr = M.frames[STILL]; drawFace(fr);
-  if (mine) for (const [x, y] of mine) { ctx.strokeStyle = css("--me"); ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.stroke(); }
+  // static: fixed face frame, the aim between the eyes and the nose, the hint on the chin
+  const fr = M.frames[STILL]; drawFace(fr, true);
+  if (mine) for (const [i, [x, y]] of mine.entries()) { if (i === 2) continue; ctx.strokeStyle = css("--me"); ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.stroke(); }
   const st = staticStep(now), dot = aimPx(st.dot), me = myAim();
-  ctx.strokeStyle = "#ffffff55"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 6]);
-  ctx.strokeRect(place.aim[0] - 14 * DEG, place.aim[1] - 12 * DEG, 28 * DEG, 24 * DEG); ctx.setLineDash([]);
   if (st.phase === "preview" && (st.cur.x !== st.prev.x || st.cur.y !== st.prev.y)) {
     const dir = [st.cur.x - st.prev.x, -(st.cur.y - st.prev.y)];
-    arrow(tp(fr[2]), dir, 110, css("--aim"));                     // arrow on the face, from the nose
+    arrow(place.aim, dir, 90, css("--aim"));                     // arrow on the face, from the aim
     const ghost = aimPx([st.cur.x, st.cur.y]);
     ctx.strokeStyle = css("--aim"); ctx.lineWidth = 2; ctx.setLineDash([5, 5]); ctx.beginPath(); ctx.arc(...ghost, 20, 0, 7); ctx.stroke(); ctx.setLineDash([]);
   }
-  ctx.fillStyle = css("--aim"); ctx.beginPath(); ctx.arc(...dot, 18, 0, 7); ctx.fill();
+  ctx.fillStyle = css("--aim"); ctx.beginPath(); ctx.arc(...dot, 14, 0, 7); ctx.fill();
   let sc = pointsScore(fr.slice(0, 5).map(tp));
   if (me) {
     const dd = Math.hypot(me[0] - dot[0], me[1] - dot[1]), ok = dd < 4 * DEG;
-    ctx.strokeStyle = ok ? css("--cont") : css("--me"); ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(...me, 13, 0, 7); ctx.stroke();
+    ctx.strokeStyle = ok ? css("--cont") : css("--me"); ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(...me, 11, 0, 7); ctx.stroke();
     if (state === "play" || state === "count") sc = Math.max(0, Math.min(100, 100 - dd / DEG * 6));
   }
-  $("say").textContent = state === "play" ? st.cur.say : "";
+  chinText(state === "play" ? st.cur.say : state === "setup" && !scores.length ? "Встань в контур" : "");
   return sc;
 }
 
