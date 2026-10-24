@@ -126,7 +126,8 @@ function clipFrame(now) {
   return Math.min(M.frames.length - 1, Math.max(0, Math.floor((now - t0) / 1000 * M.fps)));
 }
 function staticStep(now) {                               // {i, phase, dot:[x,y] degrees, prev}
-  const t = state === "play" ? now - t0 : 0, i = Math.min(PLAN.length - 1, Math.floor(t / STEP)), u = t - i * STEP;
+  // rAF time can be a hair earlier than t0 (set by performance.now()), so clamp at 0
+  const t = state === "play" ? Math.max(0, now - t0) : 0, i = Math.min(PLAN.length - 1, Math.floor(t / STEP)), u = t - i * STEP;
   const prev = i > 0 ? PLAN[i - 1] : PLAN[0], cur = PLAN[i];
   let k = 0, phase = "preview";
   if (state !== "play") phase = "setup";
