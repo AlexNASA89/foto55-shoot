@@ -63,17 +63,17 @@
       <li>Телефон на подставке, на уровне глаз. Лицом к окну. Лицо по центру.</li>
       <li>Зелёный контур с точками — где должно быть лицо. Белые кружки — твои глаза, нос, рот. Подойди/отойди, чтобы легли на цветные.</li>
     </ol>
-    <h2>Статично (главное)</h2>
+    <h2>Для ролика (статично, главное)</h2>
     <ol>
-      <li>Над лицом — жёлтая точка-цель и твой белый кружок: он ходит, когда ты поворачиваешь голову.</li>
-      <li>Сначала на лице стрелка — куда сейчас. Потом точка едет. Чуть поверни голову, чтобы кружок встал на точку. Плечи не двигай.</li>
-      <li>Влево, вправо, вверх, вниз, улыбка. Около 40 секунд.</li>
+      <li>Только то, что нужно этому ролику: прямо → голова чуть повёрнута → медленно прямо → улыбка → улыбка с прищуром. 16 секунд.</li>
+      <li>Над лицом — жёлтая точка и твой белый кружок: он ходит, когда поворачиваешь голову. Первые 3 секунды смотри прямо — так я узнаю твоё «прямо».</li>
+      <li>Перед поворотом на лице стрелка — куда. Чуть поверни голову, чтобы кружок встал на точку (станет зелёным). Плечи не двигай.</li>
     </ol>
     <h2>Под ролик</h2>
     <ol><li>Точки двигаются как в ролике, ролик в углу — повторяй мимику. 7 секунд.</li></ol>
     <p id="err"></p>
     <div class="row">
-      <button id="goStatic" class="go">Статично</button>
+      <button id="goStatic" class="go">Для ролика</button>
       <button id="goClip">Под ролик</button>
     </div>
   </div>
@@ -93,13 +93,17 @@ const COLS = ["--eye", "--eye", "--nose", "--mouth", "--mouth"];
 const COUNT = 3000, TAIL = 500;
 const STILL = 40;                                        // target frame used as the fixed face frame (calm, frontal)
 const DEG = 5;                                           // px of aim per degree of head turn
-// static plan: where the aim dot goes (degrees: x + = screen right, y + = up), what to say, smile
+// static plan for THIS clip only (Pixabay 171044, from its MediaPipe yaw/pitch and mouth width):
+// it opens turned yaw -11.6° / pitch -3.6° from its straight pose, turns straight within 0.6 s, smiles from 1.6 s,
+// squints at the end. Dot position = wanted head turn relative to Alex's own "straight" (measured in step 1),
+// degrees in screen terms: x + = screen right (raw yaw −x, mirror), y + = up (pitch +y).
 const PLAN = [
-  { x: 0, y: 0, say: "Прямо" }, { x: -12, y: 0, say: "Чуть влево" }, { x: 0, y: 0, say: "Прямо" },
-  { x: 12, y: 0, say: "Чуть вправо" }, { x: 0, y: 0, say: "Прямо" }, { x: 0, y: 10, say: "Чуть вверх" },
-  { x: 0, y: 0, say: "Прямо" }, { x: 0, y: -10, say: "Чуть вниз" }, { x: 0, y: 0, say: "Прямо" },
-  { x: -8, y: 6, say: "Влево-вверх" }, { x: 8, y: -6, say: "Вправо-вниз" }, { x: 0, y: 0, say: "Прямо" },
-  { x: 0, y: 0, say: "Улыбнись 🙂" }, { x: 0, y: 0, say: "Улыбка + прищур" }, { x: 0, y: 0, say: "Спокойно" } ];
+  { x: 0, y: 0, say: "Прямо, спокойно", calib: true },
+  { x: 11.6, y: -3.6, say: "Поверни голову к точке" },
+  { x: 0, y: 0, say: "Медленно прямо" },
+  { x: 0, y: 0, say: "Улыбнись 🙂" },
+  { x: 0, y: 0, say: "Улыбка + прищур" } ];
+let base = null, calib = [];                             // Alex's straight head turn, measured in step 1
 const PREVIEW = 700, MOVE = 1000, HOLD = 1500, STEP = PREVIEW + MOVE + HOLD;
 
 let mode = "static", M = null, lm = null, stream = null, rec = null, chunks = [], mime = "";
@@ -153,7 +157,7 @@ function detect(now) {
   if (d) head = { yaw: Math.asin(Math.max(-1, Math.min(1, -d[2]))) * 180 / Math.PI, pitch: -Math.atan2(d[6], d[10]) * 180 / Math.PI };
 }
 // my aim on screen: yaw > 0 (nose to image right) shows as screen left in the mirror
-const myAim = () => head ? aimPx([-head.yaw, head.pitch]) : null;
+const myAim = () => head ? aimPx([-(head.yaw - (base ? base.yaw : 0)), head.pitch - (base ? base.pitch : 0)]) : null;
 
 function pointsScore(T) {
   if (!mine) return 0;
@@ -216,7 +220,12 @@ function loop(now) {
   $("fill").style.width = sc + "%";
   $("fill").style.background = sc > 75 ? "#3fbf5f" : sc > 45 ? "#e0a43a" : "#d33a3a";
   if (state === "play") {
-    if (mode === "static") { const st = staticStep(now); if (st.phase === "hold") scores.push([st.i, sc]); }
+    if (mode === "static") {
+      const st = staticStep(now);
+      if (st.cur.calib && head) {                       // step 1: Alex's own "straight" becomes the zero of the dot
+        calib.push(head); base = { yaw: calib.reduce((s, h) => s + h.yaw, 0) / calib.length, pitch: calib.reduce((s, h) => s + h.pitch, 0) / calib.length };
+      } else if (st.phase === "hold") scores.push([st.i, sc]);
+    }
     else scores.push([clipFrame(now), sc]);
     const len = mode === "static" ? PLAN.length * STEP : M.frames.length / M.fps * 1000;
     if (now - t0 > len + TAIL) finishTake();
@@ -232,7 +241,7 @@ function pickMime() {
 }
 async function startTake() {
   $("start").hidden = true; $("again").hidden = true; $("save").hidden = true;
-  chunks = []; scores = []; lastBlob = null; take++;
+  chunks = []; scores = []; lastBlob = null; take++; base = null; calib = [];
   mime = pickMime();
   try { rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 25e6 } : undefined); }
   catch (e) { rec = new MediaRecorder(stream); }
@@ -290,7 +299,7 @@ async function begin(m) {
   } catch (e) {
     $("err").textContent = "Не получилось: " + (e && e.message || e) + ". Разреши камеру в Safari (аА → Настройки сайта → Камера).";
     for (const b of ["goStatic", "goClip"]) $(b).disabled = false;
-    $("goStatic").textContent = "Статично"; $("goClip").textContent = "Под ролик";
+    $("goStatic").textContent = "Для ролика"; $("goClip").textContent = "Под ролик";
   }
 }
 $("goStatic").onclick = () => begin("static");
