@@ -92,18 +92,22 @@ const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).
 const MP5 = [468, 473, 1, 61, 291];
 const COLS = ["--eye", "--eye", "--nose", "--mouth", "--mouth"];
 const COUNT = 3000, TAIL = 500;
-const STILL = 40;                                        // target frame used as the fixed face frame (calm, frontal)
+const STILL = 34;                                        // target frame used as the fixed face frame (frame 35: calm, frontal)
 const DEG = 5;                                           // px of aim per degree of head turn
 // static plan for THIS clip only (Pixabay 171044, from its MediaPipe yaw/pitch and mouth width):
 // it opens turned yaw -11.6° / pitch -3.6° from its straight pose, turns straight within 0.6 s, smiles from 1.6 s,
 // squints at the end. Dot position = wanted head turn relative to Alex's own "straight" (measured in step 1),
 // degrees in screen terms: x + = screen right (raw yaw −x, mirror), y + = up (pitch +y).
+// ghost: the clip frame shown see-through on the face for that step (pose + expression to copy)
 const PLAN = [
-  { x: 0, y: 0, say: "Прямо, спокойно", calib: true },
-  { x: 11.6, y: -3.6, say: "Поверни голову к точке" },
-  { x: 0, y: 0, say: "Медленно прямо" },
-  { x: 0, y: 0, say: "Улыбнись 🙂" },
-  { x: 0, y: 0, say: "Улыбка + прищур" } ];
+  { x: 0, y: 0, say: "Прямо, спокойно", calib: true, ghost: 35 },
+  { x: 11.6, y: -3.6, say: "Поверни голову к точке", ghost: 1 },
+  { x: 0, y: 0, say: "Медленно прямо", ghost: 25 },
+  { x: 0, y: 0, say: "Улыбнись 🙂", ghost: 60 },
+  { x: 0, y: 0, say: "Улыбка + прищур", ghost: 100 } ];
+const GHOST = {};
+for (const p of PLAN) { const im = new Image(); im.src = "g/" + String(p.ghost).padStart(4, "0") + ".jpg"; GHOST[p.ghost] = im; }
+const GHOST_ALPHA = 0.4;
 let base = null, calib = [];                             // Alex's straight head turn, measured in step 1
 const PREVIEW = 700, MOVE = 1000, HOLD = 1500, STEP = PREVIEW + MOVE + HOLD;
 
@@ -181,6 +185,20 @@ function drawFace(fr, quiet) {                          // quiet: thinner, small
     ctx.fillStyle = css(COLS[i]); ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
     ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke(); });
 }
+// the clip's face for this step, see-through, moved so its eyes + nose centre sits on the frame's (only the turn
+// and the expression differ), mirrored like the camera, cut to its own contour
+function drawGhost(n) {
+  const im = GHOST[n]; if (!im || !im.complete || !im.naturalWidth) return;
+  const g = M.frames[n - 1], f = M.frames[STILL];
+  const ctr = q => [(q[0][0] + q[1][0] + q[2][0]) / 3, (q[0][1] + q[1][1] + q[2][1]) / 3];
+  const a = ctr(f), b = ctr(g), dx = a[0] - b[0], dy = a[1] - b[1], dpr = devicePixelRatio || 1;
+  const { s, cx, cy, X, Y, W } = place;
+  ctx.save();
+  ctx.setTransform(-s * dpr, 0, 0, s * dpr, dpr * (W - X - (dx - cx) * s), dpr * (Y + (dy - cy) * s));
+  ctx.beginPath(); g.slice(5).forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); ctx.clip();
+  ctx.globalAlpha = GHOST_ALPHA; ctx.drawImage(im, 0, 0, M.size, M.size);
+  ctx.restore();
+}
 function chinText(t) {
   if (!t) return;
   ctx.font = "800 26px -apple-system, system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
@@ -204,7 +222,9 @@ function draw(now) {
     return pointsScore(fr.slice(0, 5).map(tp));
   }
   // static: fixed face frame, the aim between the eyes and the nose, the hint on the chin
-  const fr = M.frames[STILL]; drawFace(fr, true);
+  const fr = M.frames[STILL], st0 = staticStep(now);
+  drawGhost(st0.cur.ghost);
+  drawFace(fr, true);
   if (mine) for (const [i, [x, y]] of mine.entries()) { if (i === 2) continue; ctx.strokeStyle = css("--me"); ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.stroke(); }
   const st = staticStep(now), dot = aimPx(st.dot), me = myAim();
   if (st.phase === "preview" && (st.cur.x !== st.prev.x || st.cur.y !== st.prev.y)) {
